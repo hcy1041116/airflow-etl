@@ -1,0 +1,5 @@
+exercise/
+logs/
+config/airflow.cfg
+.env
+dags/__pycache__/
