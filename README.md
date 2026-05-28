@@ -1,14 +1,5 @@
 <div align="center">
 
-```
- ██████╗ ███████╗███████╗    ███████╗████████╗██╗
-██╔═══██╗██╔════╝██╔════╝    ██╔════╝╚══██╔══╝██║
-██║   ██║█████╗  █████╗      █████╗     ██║   ██║
-██║   ██║██╔══╝  ██╔══╝      ██╔══╝     ██║   ██║
-╚██████╔╝██║     ██║         ███████╗   ██║   ███████╗
- ╚═════╝ ╚═╝     ╚═╝         ╚══════╝   ╚═╝   ╚══════╝
-```
-
 **Open Food Facts — Multi-Source Incremental ETL Pipeline**
 
 ![Airflow](https://img.shields.io/badge/Apache%20Airflow-3.2.1-017CEE?style=for-the-badge&logo=apacheairflow&logoColor=white)
@@ -35,38 +26,7 @@
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Apache Airflow 3.2.1                      │
-│              Daily Schedule / Retry / Monitoring             │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ orchestrates
-          ┌────────────▼────────────┐
-          │    extract_from_off     │  GET /api/v2/search
-          │   Open Food Facts API   │  sort_by=last_modified_t
-          └────────────┬────────────┘  page through watermark
-                       │ raw JSON (巢狀)
-          ┌────────────▼────────────┐
-          │   load_raw_to_mongo     │
-          │  ┌───────────────────┐  │
-          │  │  MongoDB 7.0      │  │  barcode = _id（去重）
-          │  │  off_raw.products │  │  原樣存入，不加工
-          │  └───────────────────┘  │
-          └────────────┬────────────┘
-                       │ read raw
-          ┌────────────▼────────────┐
-          │  transform_with_pandas  │  攤平 nutriments
-          │      pandas 2.x         │  清洗缺值 / 統一單位
-          └────────────┬────────────┘  strip "en:" 前綴
-                       │ structured rows
-          ┌────────────▼────────────┐
-          │    load_to_postgres     │
-          │  ┌───────────────────┐  │
-          │  │  PostgreSQL 16    │  │  ON CONFLICT upsert
-          │  │  off_etl.products │  │  barcode = PRIMARY KEY
-          │  └───────────────────┘  │
-          └─────────────────────────┘
-```
+![Architecture](docs/airflow.drawio.png)
 
 ---
 
