@@ -13,6 +13,8 @@ ETL_POSTGRES_CONN = os.environ.get("ETL_POSTGRES_CONN", "postgresql+psycopg2://e
 OFF_SEARCH_URL = "https://world.openfoodfacts.org/api/v2/search"
 HEADERS = {"User-Agent": "off-etl-pipeline/1.0 (hcy1041116@gmail.com)"}
 WATERMARK_KEY = "off_etl_watermark"
+CURSOR_KEY = "off_etl_next_page"
+START_TS = 1772323200  # 2026-03-01 00:00:00 UTC
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS products (
@@ -21,6 +23,11 @@ CREATE TABLE IF NOT EXISTS products (
     brands              TEXT,
     quantity            TEXT,
     nutriscore_grade    TEXT,
+    nova_group          INTEGER,
+    ecoscore_grade      TEXT,
+    additives_n         INTEGER,
+    allergens           TEXT,
+    completeness        FLOAT,
     categories          TEXT,
     countries           TEXT,
     energy_kcal_100g    FLOAT,
@@ -35,16 +42,23 @@ CREATE TABLE IF NOT EXISTS products (
     created_at          TIMESTAMP,
     loaded_at           TIMESTAMP DEFAULT NOW()
 );
+ALTER TABLE products ADD COLUMN IF NOT EXISTS nova_group      INTEGER;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS ecoscore_grade  TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS additives_n     INTEGER;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS allergens       TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS completeness    FLOAT;
 """
 
 UPSERT_SQL = """
 INSERT INTO products (
     barcode, product_name, brands, quantity, nutriscore_grade,
+    nova_group, ecoscore_grade, additives_n, allergens, completeness,
     categories, countries, energy_kcal_100g, fat_100g, saturated_fat_100g,
     carbs_100g, sugars_100g, fiber_100g, proteins_100g, salt_100g,
     last_modified, created_at
 ) VALUES (
     :barcode, :product_name, :brands, :quantity, :nutriscore_grade,
+    :nova_group, :ecoscore_grade, :additives_n, :allergens, :completeness,
     :categories, :countries, :energy_kcal_100g, :fat_100g, :saturated_fat_100g,
     :carbs_100g, :sugars_100g, :fiber_100g, :proteins_100g, :salt_100g,
     :last_modified, :created_at
@@ -54,6 +68,11 @@ ON CONFLICT (barcode) DO UPDATE SET
     brands              = EXCLUDED.brands,
     quantity            = EXCLUDED.quantity,
     nutriscore_grade    = EXCLUDED.nutriscore_grade,
+    nova_group          = EXCLUDED.nova_group,
+    ecoscore_grade      = EXCLUDED.ecoscore_grade,
+    additives_n         = EXCLUDED.additives_n,
+    allergens           = EXCLUDED.allergens,
+    completeness        = EXCLUDED.completeness,
     categories          = EXCLUDED.categories,
     countries           = EXCLUDED.countries,
     energy_kcal_100g    = EXCLUDED.energy_kcal_100g,
@@ -70,23 +89,23 @@ ON CONFLICT (barcode) DO UPDATE SET
 
 
 @dag(
-    schedule="@daily",
+    schedule="*/30 * * * *",
     start_date=datetime(2026, 1, 1),
     catchup=False,
     tags=["off"],
 )
 def off_etl():
 
-    @task(retries=3, retry_delay=timedelta(seconds=30))
+    @task(retries=5, retry_delay=timedelta(seconds=90))
     def extract_from_off() -> list:
         """
         抓 Open Food Facts snacks 產品。
         按 last_modified_t 降冪排列，遇到比 watermark 舊的產品即停止分頁。
         第一次跑 watermark=0，會抓第一頁（初始載入）。
         """
-        watermark = int(Variable.get(WATERMARK_KEY, default="0"))
-        watermark_dt = datetime.fromtimestamp(watermark) if watermark else None
-        print(f"[extract] watermark = {watermark_dt or '未設定（初始載入）'}")
+        # 1777593600 = 2026-05-01 00:00:00 UTC
+        watermark = int(Variable.get(WATERMARK_KEY, default="1777593600"))
+        print(f"[extract] watermark = {datetime.fromtimestamp(watermark) if watermark else '未設定'}")
 
         all_products = []
         page = 1
@@ -95,10 +114,10 @@ def off_etl():
             params = {
                 "categories_tags_en": "snacks",
                 "sort_by": "last_modified_t",
-                "page_size": 24,
+                "page_size": 50,
                 "page": page,
             }
-            time.sleep(6)  # rate limit: 10 req/min
+            time.sleep(12)
             resp = requests.get(OFF_SEARCH_URL, params=params, headers=HEADERS, timeout=30)
             resp.raise_for_status()
 
@@ -116,15 +135,14 @@ def off_etl():
                     break
 
             all_products.extend(new_products)
-            print(f"[extract] page {page}：抓到 {len(new_products)} 筆新產品")
+            print(f"[extract] page {page}：{len(new_products)} 筆新產品，累計 {len(all_products)} 筆")
 
-            # 初始載入只抓第一頁避免壓垮本機
-            if stop or watermark == 0:
+            if stop or page >= 2:
                 break
 
             page += 1
 
-        print(f"[extract] 共抓到 {len(all_products)} 筆（watermark 之後的新增/修改）")
+        print(f"[extract] 共抓到 {len(all_products)} 筆")
         return all_products
 
     @task(retries=2, retry_delay=timedelta(seconds=10))
@@ -177,13 +195,19 @@ def off_etl():
             lmt = p.get("last_modified_t", 0)
             if lmt > max_last_modified_t:
                 max_last_modified_t = lmt
+            allergens = p.get("allergens") or None
             rows.append({
                 "barcode":            p.get("code"),
                 "product_name":       p.get("product_name"),
                 "brands":             p.get("brands"),
                 "quantity":           p.get("quantity") or None,
                 "nutriscore_grade":   p.get("nutriscore_grade"),
-                "categories":         clean_tags(p.get("categories_tags")),
+                "nova_group":         p.get("nova_group"),
+                "ecoscore_grade":     p.get("ecoscore_grade"),
+                "additives_n":        p.get("additives_n"),
+                "allergens":          allergens if allergens != "" else None,
+                "completeness":       p.get("completeness"),
+                "categories":         p.get("categories") or None,
                 "countries":          clean_tags(p.get("countries_tags")),
                 "energy_kcal_100g":   n.get("energy-kcal_100g"),
                 "fat_100g":           n.get("fat_100g"),
@@ -205,13 +229,29 @@ def off_etl():
         engine = create_engine(ETL_POSTGRES_CONN)
         with engine.begin() as conn:
             conn.execute(text(CREATE_TABLE_SQL))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS product_allergens (
+                    barcode  TEXT REFERENCES products(barcode) ON DELETE CASCADE,
+                    allergen TEXT NOT NULL,
+                    PRIMARY KEY (barcode, allergen)
+                );
+            """))
             upserted = 0
-            for row in df.itertuples(index=False):
+            for p, row in zip(raw, df.itertuples(index=False)):
                 row_dict = {k: (None if pd.isna(v) else v) for k, v in row._asdict().items()}
                 if not row_dict.get("barcode"):
                     continue
                 conn.execute(text(UPSERT_SQL), row_dict)
                 upserted += 1
+                # allergens
+                for tag in p.get("allergens_tags", []):
+                    allergen = tag.replace("en:", "").strip()
+                    if allergen:
+                        conn.execute(text("""
+                            INSERT INTO product_allergens (barcode, allergen)
+                            VALUES (:barcode, :allergen)
+                            ON CONFLICT DO NOTHING;
+                        """), {"barcode": row_dict["barcode"], "allergen": allergen})
         engine.dispose()
         print(f"[postgres] upsert {upserted} 筆")
 
