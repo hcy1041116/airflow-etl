@@ -3,3 +3,5 @@ logs/
 config/airflow.cfg
 .env
 dags/__pycache__/
+docs/architecture.md
+scripts/migrate_*.py
